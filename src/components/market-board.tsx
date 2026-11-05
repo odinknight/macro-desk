@@ -71,6 +71,22 @@ function latest(series: MacroPoint[]): MacroPoint | null {
   return series.length ? series[series.length - 1] : null;
 }
 
+function quarterEnd(date: string): string {
+  const match = /^(\d{4})-Q([1-4])$/.exec(date);
+  if (!match) return date;
+  return `${match[1]}-${["03", "06", "09", "12"][Number(match[2]) - 1]}`;
+}
+
+function MacroCell({ point }: { point: MacroPoint | null }) {
+  if (!point) return <td className="num px-3 py-2 text-muted">—</td>;
+  return (
+    <td className="num px-3 py-2">
+      <div>{point.value.toFixed(1)}%</div>
+      <div className="text-xs text-muted">{point.date}</div>
+    </td>
+  );
+}
+
 function fmtNum(n: number, digits: number): string {
   const [whole, frac] = n.toFixed(digits).split(".");
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -358,8 +374,8 @@ export function MarketBoard({ initial }: { initial: Board }) {
     dxyRet20: quote(board, "dxy")?.ret20 ?? null,
     cpi: usCpi?.value ?? null,
     gdp: usGdp?.value ?? null,
-    cpiYear: usCpi?.year ?? null,
-    gdpYear: usGdp?.year ?? null,
+    cpiAsOf: usCpi?.date ?? null,
+    gdpAsOf: usGdp?.date ?? null,
   });
   const values = nodeValues(board);
   const node = NODES.find((item) => item.id === selected) ?? NODES[0];
@@ -375,23 +391,28 @@ export function MarketBoard({ initial }: { initial: Board }) {
   const macroCountry = board.macro.find((c) => c.code === macroCode) ?? board.macro[0];
   const macroChart = useMemo(() => {
     if (!macroCountry) return [];
-    const years = new Set<string>();
-    for (const point of [...macroCountry.gdp, ...macroCountry.cpi, ...macroCountry.unemp]) years.add(point.year);
-    return [...years].sort().map((year) => ({
-      year,
-      gdp: macroCountry.gdp.find((p) => p.year === year)?.value ?? null,
-      cpi: macroCountry.cpi.find((p) => p.year === year)?.value ?? null,
-      unemp: macroCountry.unemp.find((p) => p.year === year)?.value ?? null,
-    }));
+    const byKey = new Map<string, { label: string; gdp: number | null; cpi: number | null; unemp: number | null }>();
+    const touch = (date: string) => {
+      const label = quarterEnd(date);
+      if (!byKey.has(label)) byKey.set(label, { label, gdp: null, cpi: null, unemp: null });
+      return byKey.get(label)!;
+    };
+    for (const point of macroCountry.cpi) touch(point.date).cpi = point.value;
+    for (const point of macroCountry.unemp) touch(point.date).unemp = point.value;
+    for (const point of macroCountry.gdp) touch(point.date).gdp = point.value;
+    return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label)).slice(-36);
   }, [macroCountry]);
   const scatter = board.macro
     .map((c) => {
       const g = latest(c.gdp);
       const p = latest(c.cpi);
       if (!g || !p) return null;
-      return { name: c.short, full: c.name, gdp: g.value, cpi: p.value, year: g.year };
+      return { name: c.short, full: c.name, gdp: g.value, cpi: p.value, gdpAsOf: g.date, cpiAsOf: p.date };
     })
-    .filter((row): row is { name: string; full: string; gdp: number; cpi: number; year: string } => row != null);
+    .filter(
+      (row): row is { name: string; full: string; gdp: number; cpi: number; gdpAsOf: string; cpiAsOf: string } =>
+        row != null,
+    );
   const tnx = quote(board, "tnx");
   const irx = quote(board, "irx");
   const y2 = quote(board, "y2");
@@ -435,7 +456,7 @@ export function MarketBoard({ initial }: { initial: Board }) {
       <main className="mx-auto flex max-w-6xl flex-col gap-12 px-4 py-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <p className="max-w-2xl text-sm text-muted">
-            行情约每 60 秒更新一次，取的是最新报价和近 6 个月日线，不是逐笔。宏观是世界银行年度数，各国最新年份可能不同。
+            行情约每 60 秒更新一次，取的是最新报价和近 6 个月日线，不是逐笔。实体经济按观察期标注：GDP 为季度同比，CPI 和失业率为月度，各国最新月份不必相同。
             {board.session ? ` ${SESSION[board.session] ?? board.session}。` : ""} 香港时间 {board.asOfLabel}。
           </p>
           <p className="text-xs text-muted">涨绿跌红。VIX 上升标红，因为那是压力变大，不是价格变好。</p>
@@ -492,7 +513,7 @@ export function MarketBoard({ initial }: { initial: Board }) {
                   <LogicMap selected={selected} onSelect={setSelected} values={values} />
                 </div>
               </div>
-              <p className="px-2 pb-2 text-xs text-muted">节点上的宏观数字是美国年度值。短端是 3 个月国库券，不是联邦基金目标。</p>
+              <p className="px-2 pb-2 text-xs text-muted">节点上的宏观数字是美国最新公布值，观察期见实体经济表。短端是 3 个月国库券，不是联邦基金目标。</p>
             </div>
             <aside className="panel p-5 lg:sticky lg:top-20">
               <p className="text-xs tracking-widest text-accent">当前节点</p>
@@ -725,7 +746,7 @@ export function MarketBoard({ initial }: { initial: Board }) {
           id="macro"
           kicker="实体经济"
           title="增长、通胀、失业"
-          intro="世界银行年度数据，空着表示该年还没公布。点一个国家，看它自己的三条线。散点用各国最新的 GDP 增速和 CPI，用来看谁更接近过热、谁更接近停滞。"
+          intro="GDP 是实际同比，按季，由不变价 GDP 相对上年同季算出。CPI 是月度同比。失业率是月度、季调。每个数字下面是该序列自己的观察期，不是抓取日期。没有月度序列的格子留空。点一个国家，看它 2024 年以来的三条线。散点用各国最新的 GDP 和 CPI，日期可以不同。"
         >
           <div className="grid gap-3 lg:grid-cols-2">
             <div className="panel overflow-x-auto p-2">
@@ -733,8 +754,8 @@ export function MarketBoard({ initial }: { initial: Board }) {
                 <thead className="text-muted">
                   <tr>
                     <th className="px-3 py-2 font-medium">经济体</th>
-                    <th className="px-3 py-2 font-medium">GDP 增速</th>
-                    <th className="px-3 py-2 font-medium">CPI</th>
+                    <th className="px-3 py-2 font-medium">GDP 同比</th>
+                    <th className="px-3 py-2 font-medium">CPI 同比</th>
                     <th className="px-3 py-2 font-medium">失业率</th>
                   </tr>
                 </thead>
@@ -751,9 +772,9 @@ export function MarketBoard({ initial }: { initial: Board }) {
                             {c.name}
                           </button>
                         </td>
-                        <td className="num px-3">{g ? `${g.value.toFixed(1)}% · ${g.year}` : "—"}</td>
-                        <td className="num px-3">{p ? `${p.value.toFixed(1)}% · ${p.year}` : "—"}</td>
-                        <td className="num px-3">{u ? `${u.value.toFixed(1)}% · ${u.year}` : "—"}</td>
+                        <MacroCell point={g} />
+                        <MacroCell point={p} />
+                        <MacroCell point={u} />
                       </tr>
                     );
                   })}
@@ -761,16 +782,16 @@ export function MarketBoard({ initial }: { initial: Board }) {
               </table>
             </div>
             <div className="panel p-4">
-              <h3 className="font-display text-lg">{macroCountry?.name ?? "宏观"} · 年增速 %</h3>
+              <h3 className="font-display text-lg">{macroCountry?.name ?? "宏观"} · 2024 年以来</h3>
               <div className="mt-3 h-64 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={macroChart} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                     <CartesianGrid stroke="var(--color-border)" strokeDasharray="3 3" />
-                    <XAxis dataKey="year" tick={{ fill: "var(--color-muted)", fontSize: 11 }} />
+                    <XAxis dataKey="label" tick={{ fill: "var(--color-muted)", fontSize: 11 }} minTickGap={28} />
                     <YAxis tick={{ fill: "var(--color-muted)", fontSize: 11 }} width={40} />
                     <Tooltip contentStyle={tooltipStyle} />
-                    <Line type="monotone" dataKey="gdp" name="GDP" stroke="var(--color-accent)" dot={false} isAnimationActive={false} connectNulls />
-                    <Line type="monotone" dataKey="cpi" name="CPI" stroke="var(--color-down)" dot={false} isAnimationActive={false} connectNulls />
+                    <Line type="monotone" dataKey="gdp" name="GDP同比" stroke="var(--color-accent)" dot={false} isAnimationActive={false} connectNulls />
+                    <Line type="monotone" dataKey="cpi" name="CPI同比" stroke="var(--color-down)" dot={false} isAnimationActive={false} connectNulls />
                     <Line type="monotone" dataKey="unemp" name="失业率" stroke="var(--color-fg)" dot={false} isAnimationActive={false} connectNulls />
                   </LineChart>
                 </ResponsiveContainer>
@@ -779,7 +800,7 @@ export function MarketBoard({ initial }: { initial: Board }) {
           </div>
           <div className="panel mt-3 p-4">
             <h3 className="font-display text-lg">增长—通胀位置</h3>
-            <p className="mt-1 text-sm text-muted">横轴是最新 GDP 增速，纵轴是最新 CPI。右上更接近过热，左上是滞胀的方向，左下是需求不足。</p>
+            <p className="mt-1 text-sm text-muted">横轴是最新季度的实际 GDP 同比，纵轴是最新月度 CPI 同比。右上更接近过热，左上是滞胀的方向，左下是需求不足。两条的观察期可以不一样。</p>
             <div className="mt-3 h-72 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <ScatterChart margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
@@ -791,8 +812,10 @@ export function MarketBoard({ initial }: { initial: Board }) {
                     contentStyle={tooltipStyle}
                     formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === "gdp" ? "GDP" : "CPI"]}
                     labelFormatter={(_, payload) => {
-                      const row = payload?.[0]?.payload as { full?: string; year?: string } | undefined;
-                      return row ? `${row.full} · ${row.year}` : "";
+                      const row = payload?.[0]?.payload as
+                        | { full?: string; gdpAsOf?: string; cpiAsOf?: string }
+                        | undefined;
+                      return row ? `${row.full} · GDP ${row.gdpAsOf} · CPI ${row.cpiAsOf}` : "";
                     }}
                   />
                   <Scatter data={scatter} fill="var(--color-accent)" isAnimationActive={false} />
@@ -800,10 +823,10 @@ export function MarketBoard({ initial }: { initial: Board }) {
               </ResponsiveContainer>
             </div>
             <p className="text-xs text-muted">
-              {scatter.map((row) => `${row.name}${row.gdp.toFixed(1)}/${row.cpi.toFixed(1)}`).join("  ·  ")}
+              {scatter.map((row) => `${row.name}${row.gdp.toFixed(1)}(${row.gdpAsOf})/${row.cpi.toFixed(1)}(${row.cpiAsOf})`).join("  ·  ")}
             </p>
           </div>
-          {usUnemp ? <p className="mt-2 text-xs text-muted">美国失业率最新公布 {usUnemp.value.toFixed(2)}%（{usUnemp.year}）。</p> : null}
+          {usUnemp ? <p className="mt-2 text-xs text-muted">美国失业率最新公布 {usUnemp.value.toFixed(2)}%（{usUnemp.date}）。</p> : null}
         </Section>
 
         <Section
@@ -854,8 +877,7 @@ export function MarketBoard({ initial }: { initial: Board }) {
         </Section>
 
         <footer className="border-t border-border pt-4 text-xs leading-relaxed text-muted">
-          行情来自 Yahoo Finance 的最新报价与日线，可能有延迟。2 年期使用收益率期货 2YY=F。宏观序列来自世界银行：实际 GDP 增速 NY.GDP.MKTP.KD.ZG、CPI 年增速 FP.CPI.TOTL.ZG、失业率 SL.UEM.TOTL.ZS
-          {board.macroUpdated ? `，库更新于 ${board.macroUpdated}` : ""}。相关不是因果。本页不构成投资建议。
+          行情来自 Yahoo Finance 的最新报价与日线，可能有延迟。2 年期使用收益率期货 2YY=F。实体经济来自世界银行全球经济监测，不是年度库：CPI 为季调名义同比（月），失业率为季调（月），实际 GDP 同比由不变价季调 GDP 相对上年同季计算（季）。美国 CPI 和失业率若能取到劳工统计局更近的月份，就改用那一条（未季调 CPI-U 同比、季调失业率）。中国、印度没有这条月度失业率，澳大利亚没有这条月度 CPI。观察期标在每个数字下面。相关不是因果。本页不构成投资建议。
         </footer>
       </main>
     </div>

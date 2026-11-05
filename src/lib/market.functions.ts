@@ -16,7 +16,7 @@ export type Quote = {
   marketState: string | null;
 };
 
-export type MacroPoint = { year: string; value: number };
+export type MacroPoint = { date: string; value: number };
 export type MacroCountry = {
   code: string;
   name: string;
@@ -114,11 +114,166 @@ const COUNTRIES: { code: string; name: string; short: string }[] = [
   { code: "HKG", name: "中国香港", short: "港" },
 ];
 
-const INDICATORS = {
-  gdp: "NY.GDP.MKTP.KD.ZG",
-  cpi: "FP.CPI.TOTL.ZG",
-  unemp: "SL.UEM.TOTL.ZS",
-} as const;
+const WB_CODES = "US;CN;JP;DE;GB;FR;IN;KR;AU;CA;BR;IT;MX;HK";
+
+type WbRow = {
+  countryiso3code?: string;
+  country?: { id?: string };
+  date?: string;
+  value?: number | null;
+};
+
+function wbCode(row: WbRow): string {
+  return row.country?.id || row.countryiso3code || "";
+}
+
+function monthLabel(raw: string): string | null {
+  const month = /^(\d{4})M(\d{2})$/.exec(raw);
+  if (month) return `${month[1]}-${month[2]}`;
+  return null;
+}
+
+async function fetchWb(indicator: string, date: string): Promise<WbRow[]> {
+  const url = `https://api.worldbank.org/v2/country/${WB_CODES}/indicator/${indicator}?format=json&date=${date}&per_page=800`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: "application/json" } });
+    if (!res.ok) return [];
+    const json = (await res.json()) as [unknown, WbRow[] | null];
+    return Array.isArray(json?.[1]) ? json[1] : [];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function monthlyMap(rows: WbRow[], from: string): Map<string, MacroPoint[]> {
+  const map = new Map<string, MacroPoint[]>();
+  const allowed = new Set(COUNTRIES.map((c) => c.code));
+  for (const row of rows) {
+    const code = wbCode(row);
+    const date = row.date ? monthLabel(row.date) : null;
+    if (!code || !allowed.has(code) || !date || date < from || row.value == null || !Number.isFinite(row.value)) continue;
+    const list = map.get(code) ?? [];
+    list.push({ date, value: row.value });
+    map.set(code, list);
+  }
+  for (const list of map.values()) list.sort((a, b) => a.date.localeCompare(b.date));
+  return map;
+}
+
+function gdpYoyMap(rows: WbRow[]): Map<string, MacroPoint[]> {
+  const levels = new Map<string, Map<string, number>>();
+  const allowed = new Set(COUNTRIES.map((c) => c.code));
+  for (const row of rows) {
+    const code = wbCode(row);
+    if (!code || !allowed.has(code) || !row.date || row.value == null || !Number.isFinite(row.value)) continue;
+    if (!/^\d{4}Q[1-4]$/.test(row.date)) continue;
+    const bucket = levels.get(code) ?? new Map<string, number>();
+    bucket.set(row.date, row.value);
+    levels.set(code, bucket);
+  }
+  const map = new Map<string, MacroPoint[]>();
+  for (const [code, bucket] of levels) {
+    const points: MacroPoint[] = [];
+    for (const [raw, value] of bucket) {
+      const match = /^(\d{4})Q([1-4])$/.exec(raw);
+      if (!match) continue;
+      const base = bucket.get(`${Number(match[1]) - 1}Q${match[2]}`);
+      if (!base) continue;
+      const date = `${match[1]}-Q${match[2]}`;
+      if (date < "2024-Q1") continue;
+      points.push({ date, value: (value / base - 1) * 100 });
+    }
+    points.sort((a, b) => a.date.localeCompare(b.date));
+    map.set(code, points);
+  }
+  return map;
+}
+
+type BlsPoint = { year: string; period: string; value: string };
+
+async function fetchBls(seriesId: string): Promise<BlsPoint[]> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(`https://api.bls.gov/publicAPI/v1/timeseries/data/${seriesId}`, {
+      signal: ctrl.signal,
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as { Results?: { series?: { data?: BlsPoint[] }[] } };
+    return json.Results?.series?.[0]?.data ?? [];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function blsRate(): Promise<MacroPoint[]> {
+  return fetchBls("LNS14000000").then((rows) => {
+    const points: MacroPoint[] = [];
+    for (const row of rows) {
+      if (!/^M(0[1-9]|1[0-2])$/.test(row.period)) continue;
+      const value = Number(row.value);
+      if (!Number.isFinite(value)) continue;
+      points.push({ date: `${row.year}-${row.period.slice(1)}`, value });
+    }
+    points.sort((a, b) => a.date.localeCompare(b.date));
+    return points.filter((point) => point.date >= "2024-01");
+  });
+}
+
+function blsCpiYoy(): Promise<MacroPoint[]> {
+  return fetchBls("CUUR0000SA0").then((rows) => {
+    const level = new Map<string, number>();
+    for (const row of rows) {
+      if (!/^M(0[1-9]|1[0-2])$/.test(row.period)) continue;
+      const value = Number(row.value);
+      if (!Number.isFinite(value)) continue;
+      level.set(`${row.year}-${row.period}`, value);
+    }
+    const points: MacroPoint[] = [];
+    for (const [key, value] of level) {
+      const match = /^(\d{4})-(M\d{2})$/.exec(key);
+      if (!match) continue;
+      const base = level.get(`${Number(match[1]) - 1}-${match[2]}`);
+      if (!base) continue;
+      const date = `${match[1]}-${match[2].slice(1)}`;
+      if (date < "2024-01") continue;
+      points.push({ date, value: (value / base - 1) * 100 });
+    }
+    points.sort((a, b) => a.date.localeCompare(b.date));
+    return points;
+  });
+}
+
+async function fetchMacro(): Promise<{ macro: MacroCountry[]; updated: string | null }> {
+  const [cpiRows, unempRows, gdpRows, usCpi, usUnemp] = await Promise.all([
+    fetchWb("CPTOTSAXNZGY", "2024M01:2026M12"),
+    fetchWb("UNEMPSA_", "2024M01:2026M12"),
+    fetchWb("NYGDPMKTPSAKD", "2023Q1:2026Q4"),
+    blsCpiYoy(),
+    blsRate(),
+  ]);
+  const cpi = monthlyMap(cpiRows, "2024-01");
+  const unemp = monthlyMap(unempRows, "2024-01");
+  const gdp = gdpYoyMap(gdpRows);
+  if (usCpi.length) cpi.set("USA", usCpi);
+  if (usUnemp.length) unemp.set("USA", usUnemp);
+  const macro: MacroCountry[] = COUNTRIES.map((c) => ({
+    code: c.code,
+    name: c.name,
+    short: c.short,
+    gdp: gdp.get(c.code) ?? [],
+    cpi: cpi.get(c.code) ?? [],
+    unemp: unemp.get(c.code) ?? [],
+  }));
+  return { macro, updated: "GEM" };
+}
 
 let cache: { at: number; board: Board } | null = null;
 const TTL_MS = 45_000;
@@ -206,36 +361,31 @@ async function fetchYahoo(spec: Spec): Promise<Quote | null> {
   }
 }
 
-type SeriesMap = Map<string, MacroPoint[]>;
-
-async function fetchIndicator(indicator: string): Promise<{ updated: string | null; map: SeriesMap }> {
-  const iso = COUNTRIES.map((c) => c.code).join(";");
-  const url = `https://api.worldbank.org/v2/country/${iso}/indicator/${indicator}?format=json&per_page=800&date=2016:2026`;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
-  const map: SeriesMap = new Map();
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: "application/json" } });
-    if (!res.ok) return { updated: null, map };
-    const json = (await res.json()) as [
-      { lastupdated?: string } | null,
-      { countryiso3code?: string; date?: string; value?: number | null }[] | null,
-    ];
-    const updated = json?.[0]?.lastupdated ?? null;
-    const rows = Array.isArray(json?.[1]) ? json[1] : [];
-    for (const row of rows) {
-      if (!row.countryiso3code || !row.date || row.value == null || !Number.isFinite(row.value)) continue;
-      const list = map.get(row.countryiso3code) ?? [];
-      list.push({ year: row.date, value: row.value });
-      map.set(row.countryiso3code, list);
-    }
-    for (const list of map.values()) list.sort((a, b) => a.year.localeCompare(b.year));
-    return { updated, map };
-  } catch {
-    return { updated: null, map };
-  } finally {
-    clearTimeout(timer);
+async function loadBoard(): Promise<Board> {
+  const [quoteRows, macroRes] = await Promise.all([pool(SYMBOLS, 8, fetchYahoo), fetchMacro()]);
+  const quotes = quoteRows.filter((q): q is Quote => q != null);
+  const failed = SYMBOLS.filter((s) => !quotes.some((q) => q.id === s.id)).map((s) => s.name);
+  if (quotes.length < 8) {
+    throw new Error("行情源暂时不可用，请稍后再刷新。");
   }
+  const session = quotes.find((q) => q.id === "spx")?.marketState ?? null;
+  return {
+    asOf: Date.now(),
+    asOfLabel: new Date().toLocaleString("zh-CN", {
+      timeZone: "Asia/Hong_Kong",
+      hour12: false,
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+    session,
+    quotes,
+    failed,
+    macro: macroRes.macro,
+    macroUpdated: macroRes.updated,
+    corr: correlation(quotes),
+  };
 }
 
 function pearson(xs: number[], ys: number[]): number | null {
@@ -302,46 +452,6 @@ function correlation(quotes: Quote[]): Board["corr"] {
   return { ids, labels, matrix };
 }
 
-async function loadBoard(): Promise<Board> {
-  const [quoteRows, gdpRes, cpiRes, unempRes] = await Promise.all([
-    pool(SYMBOLS, 8, fetchYahoo),
-    fetchIndicator(INDICATORS.gdp),
-    fetchIndicator(INDICATORS.cpi),
-    fetchIndicator(INDICATORS.unemp),
-  ]);
-  const quotes = quoteRows.filter((q): q is Quote => q != null);
-  const failed = SYMBOLS.filter((s) => !quotes.some((q) => q.id === s.id)).map((s) => s.name);
-  if (quotes.length < 8) {
-    throw new Error("行情源暂时不可用，请稍后再刷新。");
-  }
-  const macro: MacroCountry[] = COUNTRIES.map((c) => ({
-    code: c.code,
-    name: c.name,
-    short: c.short,
-    gdp: gdpRes.map.get(c.code) ?? [],
-    cpi: cpiRes.map.get(c.code) ?? [],
-    unemp: unempRes.map.get(c.code) ?? [],
-  })).filter((c) => c.gdp.length || c.cpi.length || c.unemp.length);
-  const session = quotes.find((q) => q.id === "spx")?.marketState ?? null;
-  return {
-    asOf: Date.now(),
-    asOfLabel: new Date().toLocaleString("zh-CN", {
-      timeZone: "Asia/Hong_Kong",
-      hour12: false,
-      month: "numeric",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
-    session,
-    quotes,
-    failed,
-    macro,
-    macroUpdated: gdpRes.updated ?? cpiRes.updated ?? unempRes.updated,
-    corr: correlation(quotes),
-  };
-}
-
 export const getBoard = createServerFn({ method: "GET" })
   .validator((input: unknown) => {
     if (input && typeof input === "object" && "fresh" in input && (input as { fresh?: unknown }).fresh === true) {
@@ -352,6 +462,7 @@ export const getBoard = createServerFn({ method: "GET" })
   .handler(async ({ data }): Promise<Board> => {
     if (!data.fresh && cache && Date.now() - cache.at < TTL_MS) return cache.board;
     const board = await loadBoard();
-    cache = { at: Date.now(), board };
+    const macroAlive = board.macro.some((c) => c.gdp.length || c.cpi.length || c.unemp.length);
+    if (macroAlive) cache = { at: Date.now(), board };
     return board;
   });

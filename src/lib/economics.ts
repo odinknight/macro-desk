@@ -80,7 +80,7 @@ export const NODES: LogicNode[] = [
     y: 78,
     blurb: "物价增速，名义利率里的水分。",
     mechanism:
-      "节点上的数字是美国 CPI 年增速，来自世界银行，按年公布，有滞后。它不是本月的高频通胀，只用来把名义利率换成近似实际利率，并把各国放在同一张增长—通胀图上。",
+      "节点上的数字是美国 CPI 同比，月度，观察期标在实体经济表里。它用来把名义利率换成近似实际利率，并把各国放在同一张增长—通胀图上。发布有滞后，所以不一定是本月。",
   },
   {
     id: "policy",
@@ -98,7 +98,7 @@ export const NODES: LogicNode[] = [
     y: 78,
     blurb: "名义长端减去通胀。",
     mechanism:
-      "近似公式：实际利率 ≈ 美国 10 年期名义收益率 − 美国 CPI 年增速。CPI 是年度、滞后的，所以这是量级，不是精确的 TIPS 实际收益率。黄金和长久期资产主要看它。",
+      "近似公式：实际利率 ≈ 美国 10 年期名义收益率 − 美国 CPI 月度同比。CPI 有发布滞后，所以这是量级，不是精确的 TIPS 实际收益率。黄金和长久期资产主要看它。",
   },
   {
     id: "unemp",
@@ -107,7 +107,7 @@ export const NODES: LogicNode[] = [
     y: 230,
     blurb: "滞后、但比较硬的周期指标。",
     mechanism:
-      "节点上是美国失业率（世界银行，年度）。失业上升通常说明需求已经转弱。它来得晚，所以市场经常先交易其他指标，再用失业去确认。",
+      "节点上是美国失业率，月度、季调。失业上升通常说明需求已经转弱。它来得晚，所以市场经常先交易其他指标，再用失业去确认。",
   },
   {
     id: "gdp",
@@ -116,7 +116,7 @@ export const NODES: LogicNode[] = [
     y: 230,
     blurb: "盈利的来源，也是过热的来源。",
     mechanism:
-      "节点上是美国实际 GDP 年增速。增长走两条方向相反的路：一条改善企业现金流，支撑股市；一条抬高中性利率，压低估值。净效果要看当时哪条更紧。",
+      "节点上是美国实际 GDP 同比，季度。增长走两条方向相反的路：一条改善企业现金流，支撑股市；一条抬高中性利率，压低估值。净效果要看当时哪条更紧。",
   },
   {
     id: "y10",
@@ -379,7 +379,7 @@ export const EDGES: LogicEdge[] = [
 ];
 
 export function consistency(sign: Sign, rho: number | null): string {
-  if (rho == null || Number.isNaN(rho)) return "没有足够重叠的日频样本。宏观年度数据不进相关矩阵。";
+  if (rho == null || Number.isNaN(rho)) return "没有足够重叠的日频样本。宏观序列不进相关矩阵。";
   if (sign === "±") return "这条机制本身是条件式的，相关可正可负。";
   if (Math.abs(rho) < 0.15) return "近 60 个共同交易日里关系很弱，方向不稳定。";
   const same = (sign === "+" && rho > 0) || (sign === "-" && rho < 0);
@@ -398,10 +398,10 @@ export function buildNarrative(input: {
   dxyRet20: number | null;
   cpi: number | null;
   gdp: number | null;
-  cpiYear: string | null;
-  gdpYear: string | null;
+  cpiAsOf: string | null;
+  gdpAsOf: string | null;
 }): { title: string; body: string } {
-  const { vix, vix3m, tnx, irx, y2, spxRet20, dxyRet20, cpi, gdp, cpiYear, gdpYear } = input;
+  const { vix, vix3m, tnx, irx, y2, spxRet20, dxyRet20, cpi, gdp, cpiAsOf, gdpAsOf } = input;
   const curve3 = tnx != null && irx != null ? (tnx - irx) * 100 : null;
   const backwd = vix != null && vix3m != null && vix > vix3m + 0.4;
   const vixStress = vix != null && vix >= 25;
@@ -448,12 +448,12 @@ export function buildNarrative(input: {
   }
   if (tnx != null && cpi != null) {
     parts.push(
-      `近似实际利率 ${(tnx - cpi).toFixed(2)}%（10 年期减美国 CPI ${cpi.toFixed(2)}%，${cpiYear ?? "年份未标明"}，世界银行，有发布滞后）。`,
+      `近似实际利率 ${(tnx - cpi).toFixed(2)}%（10 年期减美国 CPI 同比 ${cpi.toFixed(2)}%，观察期 ${cpiAsOf ?? "未标明"}，有发布滞后）。`,
     );
   }
   if (gdp != null) {
     parts.push(
-      `美国实际 GDP 最新公布增速 ${gdp.toFixed(2)}%（${gdpYear ?? "年份未标明"}）。增长走盈利渠道支撑股市，同时会把中性利率推高。`,
+      `美国实际 GDP 同比 ${gdp.toFixed(2)}%（${gdpAsOf ?? "观察期未标明"}）。增长走盈利渠道支撑股市，同时会把中性利率推高。`,
     );
   }
   if (dxyRet20 != null) {
