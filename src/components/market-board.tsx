@@ -581,7 +581,7 @@ export function MarketBoard({ initial }: { initial: Board }) {
             <NormChart
               board={board}
               days={equityDays}
-              ids={["spx", "ndx", "dji", "hsi", "sse", "n225", "dax", "ftse", "cac", "stoxx", "nifty", "ks11", "axjo"]}
+              ids={["spx", "ndx", "dji", "hsi", "sse", "star", "n225", "dax", "ftse", "cac", "stoxx", "nifty", "ks11", "axjo"]}
             />
           </div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
