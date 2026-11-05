@@ -1,0 +1,12 @@
+node_modules
+.git
+.vercel
+.output
+dist
+screenshots
+artifacts
+*.log
+.env
+.env.*
+.grok/preview.pid
+.grok/preview.log

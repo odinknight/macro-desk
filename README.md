@@ -15,6 +15,37 @@ npm run dev
 
 浏览器打开后，顶栏可以切到传导、股市、汇率、债市、实体和相关。点传导图上的节点，只展开和它相连的关系。
 
-## 部署
+## 云主机常驻
 
-这是带服务端取数的 TanStack Start 应用，不能当纯静态站丢到 GitHub Pages。接到 Vercel 后使用默认的 `npm run build`，不要配置数据库。本应用不需要登录。
+Vercel 免费档有月度用量，用完会停。放到一台小云主机上则按月付费，进程一直开着，不按函数时长停服。
+
+行情要从服务器去拉 Yahoo Finance。请用香港、新加坡或东京的机器。中国大陆机房经常连不上这个数据源，页面会空。
+
+服务器需要 Docker。Ubuntu 上：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+git clone https://github.com/odinknight/macro-desk.git /opt/macro-desk
+cd /opt/macro-desk
+sudo docker compose up -d --build
+```
+
+浏览器打开 `http://服务器IP:8080`。以后更新：
+
+```bash
+cd /opt/macro-desk
+git pull
+sudo docker compose up -d --build
+```
+
+`restart: unless-stopped` 会在 Docker 随开机启动后把网站拉起来。也可以再登记一份 systemd，路径按实际安装改：
+
+```bash
+sudo cp deploy/macro-desk.service /etc/systemd/system/
+sudo systemctl enable --now macro-desk
+```
+
+有域名时，在前面加一层 Caddy 或 Nginx 做 HTTPS，反代到 `127.0.0.1:8080`，防火墙只放行 80 和 443。
+
